@@ -17,7 +17,7 @@ The organization faced recurring challenges with:
   
 ## Architecture Overview
 
-![Windows 365 Cloud PC – Cost-Optimized Architecture](./architecture-diagram.png)
+![Windows 365 Cloud PC – Cost-Optimized Architecture](./architecture-diagram.PNG)
 
 The architecture leverages **Windows 365 Cloud PC** as a centralized, secure desktop platform
 delivered over the cloud, eliminating the need for physical endpoints.
