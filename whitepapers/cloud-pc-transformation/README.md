@@ -14,7 +14,7 @@ The organization faced recurring challenges with:
 - Delays in onboarding and offboarding temporary staff
 - Security risks associated with unmanaged or personally owned devices
 - Operational overhead for IT support and device lifecycle management
-- 
+  
 ## Architecture Overview
 
 ![Windows 365 Cloud PC – Cost-Optimized Architecture](architecture-diagram.png)
