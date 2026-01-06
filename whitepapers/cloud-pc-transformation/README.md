@@ -48,5 +48,3 @@ The cost savings were achieved through:
 - Improved security posture with reduced attack surface
 - Simplified IT operations and reduced support tickets
   
-## Whitepaper
-📄
