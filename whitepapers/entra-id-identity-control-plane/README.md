@@ -14,7 +14,7 @@ applications.
 - Identity Protection for risk-based access decisions
 - Conditional Access enforcing Zero Trust policies
 - Pure Microsoft implementation (no third-party IdPs)
-- 
+  
 ## Whitepaper
 📄 **Download PDF**  
 [Entra ID as an Identity Control Plane – State Public Sector](entra-id-identity-control-plane.pdf)
