@@ -1,0 +1,273 @@
+// ============================================================================
+// FILE: 01-authentication-monitoring.kql
+// CATEGORY: Authentication & Sign-in Monitoring
+// DESCRIPTION: Queries to monitor authentication patterns and detect anomalies
+// LAST UPDATED: January 2026
+// ============================================================================
+
+// ============================================================================
+// Query 1.1: Failed Sign-in Attempts by User
+// Description: Detects users with multiple failed sign-in attempts
+// Use Case: Identify potential brute force attacks against user accounts
+// MITRE ATT&CK: T1110 - Brute Force
+// Severity: Medium
+// False Positive Rate: Low
+// ============================================================================
+SigninLogs
+| where TimeGenerated > ago(24h)
+| where ResultType != "0"  // 0 = successful sign-in
+| summarize 
+    FailedAttempts = count(), 
+    IPAddresses = make_set(IPAddress),
+    Locations = make_set(Location),
+    ErrorCodes = make_set(ResultType),
+    Apps = make_set(AppDisplayName),
+    FirstFailure = min(TimeGenerated),
+    LastFailure = max(TimeGenerated)
+    by UserPrincipalName
+| where FailedAttempts > 5  // Adjust threshold based on your environment
+| extend TimeDuration = datetime_diff('minute', LastFailure, FirstFailure)
+| project-reorder TimeGenerated, UserPrincipalName, FailedAttempts, TimeDuration, IPAddresses, Locations
+| order by FailedAttempts desc
+
+// Expected Output: Users with >5 failed logins, their IPs, locations
+// Common False Positives: Users with expired passwords, locked accounts
+// Tuning: Increase threshold for organizations with frequent password changes
+
+
+// ============================================================================
+// Query 1.2: Successful Sign-ins After Multiple Failures
+// Description: Identifies potential successful brute force attacks
+// Use Case: Detect when an attacker succeeds after multiple failed attempts
+// MITRE ATT&CK: T1110.001 - Password Guessing
+// Severity: High
+// False Positive Rate: Medium
+// ============================================================================
+SigninLogs
+| where TimeGenerated > ago(1h)
+| order by UserPrincipalName, TimeGenerated asc
+| extend PreviousResultType = prev(ResultType, 1)
+| extend PreviousUser = prev(UserPrincipalName, 1)
+| where UserPrincipalName == PreviousUser
+| where ResultType == "0" and PreviousResultType != "0"
+| summarize 
+    FailedBeforeSuccess = countif(PreviousResultType != "0"),
+    FirstFailure = min(TimeGenerated),
+    SuccessTime = max(TimeGenerated),
+    DistinctIPs = dcount(IPAddress),
+    IPs = make_set(IPAddress)
+    by UserPrincipalName
+| where FailedBeforeSuccess >= 3  // At least 3 failures before success
+| extend TimeBetween = datetime_diff('minute', SuccessTime, FirstFailure)
+| project SuccessTime, UserPrincipalName, FailedBeforeSuccess, TimeBetween, DistinctIPs, IPs
+| order by FailedBeforeSuccess desc
+
+// Expected Output: Accounts that succeeded after multiple failures
+// Common False Positives: Users who mistyped passwords multiple times
+// Tuning: Increase failure threshold or decrease time window
+
+
+// ============================================================================
+// Query 1.3: Sign-ins from Unfamiliar Locations
+// Description: Detects sign-ins from countries/locations not seen recently
+// Use Case: Identify potential account compromise from new geographic locations
+// MITRE ATT&CK: T1078 - Valid Accounts
+// Severity: Medium
+// False Positive Rate: Medium
+// ============================================================================
+let LookbackPeriod = 14d;
+let KnownLocations = SigninLogs
+    | where TimeGenerated between(ago(LookbackPeriod)..ago(1d))
+    | where ResultType == "0"
+    | summarize by UserPrincipalName, Location;
+SigninLogs
+| where TimeGenerated > ago(1d)
+| where ResultType == "0"
+| where isnotempty(Location)
+| join kind=leftanti KnownLocations on UserPrincipalName, Location
+| project 
+    TimeGenerated, 
+    UserPrincipalName, 
+    Location, 
+    IPAddress, 
+    AppDisplayName, 
+    DeviceDetail,
+    RiskLevelDuringSignIn,
+    RiskLevelAggregated
+| order by TimeGenerated desc
+
+// Expected Output: Sign-ins from new/unusual locations
+// Common False Positives: Traveling users, remote workers, VPN users
+// Tuning: Adjust lookback period, exclude known VPN locations
+
+
+// ============================================================================
+// Query 1.4: Impossible Travel Detection
+// Description: Identifies sign-ins from geographically distant locations 
+//              within a physically impossible timeframe
+// Use Case: Detect account sharing or credential theft
+// MITRE ATT&CK: T1078 - Valid Accounts
+// Severity: High
+// False Positive Rate: Low
+// ============================================================================
+SigninLogs
+| where TimeGenerated > ago(24h)
+| where ResultType == "0"
+| where isnotempty(Location) and isnotempty(IPAddress)
+| project TimeGenerated, UserPrincipalName, Location, IPAddress, Latitude, Longitude
+| order by UserPrincipalName, TimeGenerated asc
+| serialize
+| extend 
+    NextLocation = next(Location, 1), 
+    NextTime = next(TimeGenerated, 1),
+    NextUser = next(UserPrincipalName, 1),
+    NextIP = next(IPAddress, 1),
+    NextLat = next(Latitude, 1),
+    NextLong = next(Longitude, 1)
+| where UserPrincipalName == NextUser
+| where Location != NextLocation
+| extend TimeDiffMinutes = datetime_diff('minute', NextTime, TimeGenerated)
+| where TimeDiffMinutes > 0 and TimeDiffMinutes < 60  // Within 60 minutes
+| project 
+    TimeGenerated, 
+    UserPrincipalName, 
+    FirstLocation = Location, 
+    SecondLocation = NextLocation,
+    FirstIP = IPAddress, 
+    SecondIP = NextIP,
+    TimeDiffMinutes
+| order by TimeDiffMinutes asc
+
+// Expected Output: Sign-ins from different locations within short time
+// Common False Positives: VPN switching, shared accounts (service accounts)
+// Tuning: Adjust time window (60 min default), calculate actual distance
+
+
+// ============================================================================
+// Query 1.5: Multiple Failed Sign-ins Across Different Accounts from Same IP
+// Description: Detects potential credential stuffing or password spraying
+// Use Case: Identify attackers trying multiple user accounts
+// MITRE ATT&CK: T1110.003 - Password Spraying
+// Severity: High
+// False Positive Rate: Low
+// ============================================================================
+SigninLogs
+| where TimeGenerated > ago(1h)
+| where ResultType != "0"
+| summarize 
+    FailedUsers = dcount(UserPrincipalName),
+    AttemptedAccounts = make_set(UserPrincipalName),
+    TotalAttempts = count(),
+    Apps = make_set(AppDisplayName),
+    ErrorCodes = make_set(ResultType)
+    by IPAddress, Location, bin(TimeGenerated, 5m)
+| where FailedUsers >= 5  // Attempted 5 or more different accounts
+| order by FailedUsers desc
+
+// Expected Output: IPs attempting to authenticate as multiple users
+// Common False Positives: Shared office IPs, NAT gateways, proxy servers
+// Tuning: Increase user threshold for large offices, exclude known corporate IPs
+
+
+// ============================================================================
+// Query 1.6: Authentication Attempts from Disabled Accounts
+// Description: Detects sign-in attempts from disabled user accounts
+// Use Case: Identify potential security gaps or misconfigurations
+// MITRE ATT&CK: T1078 - Valid Accounts
+// Severity: Medium
+// False Positive Rate: Low
+// ============================================================================
+SigninLogs
+| where TimeGenerated > ago(7d)
+| where ResultType == "50057"  // User account is disabled
+| summarize 
+    AttemptCount = count(),
+    FirstAttempt = min(TimeGenerated),
+    LastAttempt = max(TimeGenerated),
+    IPAddresses = make_set(IPAddress),
+    Locations = make_set(Location),
+    Apps = make_set(AppDisplayName)
+    by UserPrincipalName
+| order by AttemptCount desc
+
+// Expected Output: Disabled accounts with login attempts
+// Common False Positives: Recently disabled accounts, pending sync delays
+// Tuning: Exclude recently disabled accounts (first 24h)
+
+
+// ============================================================================
+// Query 1.7: Sign-in Velocity - Rapid Authentication Attempts
+// Description: Detects unusually rapid sign-in attempts from single account
+// Use Case: Identify automated tools or bots attempting authentication
+// MITRE ATT&CK: T1110 - Brute Force
+// Severity: Medium
+// False Positive Rate: Medium
+// ============================================================================
+SigninLogs
+| where TimeGenerated > ago(1h)
+| summarize 
+    SignInCount = count(),
+    SuccessCount = countif(ResultType == "0"),
+    FailureCount = countif(ResultType != "0"),
+    DistinctIPs = dcount(IPAddress),
+    IPs = make_set(IPAddress)
+    by UserPrincipalName, bin(TimeGenerated, 1m)
+| where SignInCount > 10  // More than 10 attempts per minute
+| project TimeGenerated, UserPrincipalName, SignInCount, SuccessCount, FailureCount, DistinctIPs, IPs
+| order by SignInCount desc
+
+// Expected Output: Accounts with rapid authentication attempts
+// Common False Positives: Service accounts, API authentication, mobile apps
+// Tuning: Adjust attempts per minute threshold, exclude service accounts
+
+
+// ============================================================================
+// Query 1.8: Interrupted Sign-in Flows
+// Description: Detects interrupted or cancelled authentication attempts
+// Use Case: Identify suspicious authentication patterns
+// MITRE ATT&CK: T1110 - Brute Force
+// Severity: Low
+// False Positive Rate: Medium
+// ============================================================================
+SigninLogs
+| where TimeGenerated > ago(24h)
+| where ResultType in ("50074", "50076", "50079", "50072")  // Interrupted flow codes
+| summarize 
+    InterruptedCount = count(),
+    ErrorTypes = make_set(ResultType),
+    LastOccurrence = max(TimeGenerated),
+    IPs = make_set(IPAddress)
+    by UserPrincipalName, AppDisplayName
+| where InterruptedCount >= 3
+| order by InterruptedCount desc
+
+// Expected Output: Accounts with interrupted authentication flows
+// Common False Positives: MFA enrollment, browser issues, network problems
+// Tuning: Increase threshold, exclude specific apps with known issues
+
+
+// ============================================================================
+// ADDITIONAL NOTES
+// ============================================================================
+// 
+// Time Range Adjustments:
+// - Testing: ago(1h) or ago(6h)
+// - Production: ago(24h) for real-time, ago(7d) for hunting
+// - Historical analysis: ago(30d) or ago(90d)
+//
+// Threshold Recommendations by Organization Size:
+// - Small (< 100 users): Keep default thresholds
+// - Medium (100-1000): Increase by 50%
+// - Large (> 1000): Increase by 100-200%
+//
+// Performance Tips:
+// - Use shorter time ranges during testing
+// - Add specific user/IP filters when investigating
+// - Use summarize to reduce result set size
+//
+// Integration with Analytics Rules:
+// - Set appropriate severity levels
+// - Configure alert grouping by UserPrincipalName or IPAddress
+// - Enable automated response for high-severity alerts
+//
+// ============================================================================
