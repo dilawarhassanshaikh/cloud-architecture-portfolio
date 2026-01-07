@@ -1,0 +1,489 @@
+// ============================================================================
+// FILE: 07-application-activities.kql
+// CATEGORY: Application & Service Principal Activities
+// DESCRIPTION: Monitor application registrations, permissions, and service principals
+// LAST UPDATED: January 2026
+// ============================================================================
+// ============================================================================
+// Query 7.1: New Application Registrations
+// Description: Track newly registered applications in the tenant
+// Use Case: Monitor for unauthorized or suspicious app registrations
+// MITRE ATT&CK: T1550 - Use Alternate Authentication Material
+// Severity: Medium
+// False Positive Rate: Low
+// ============================================================================
+AuditLogs
+| where TimeGenerated > ago(30d)
+| where OperationName == “Add application”
+| extend
+AppName = tostring(TargetResources[0].displayName),
+CreatedBy = tostring(InitiatedBy.user.userPrincipalName),
+CreatedByIP = tostring(InitiatedBy.user.ipAddress),
+AppId = tostring(TargetResources[0].id)
+| project
+TimeGenerated,
+AppName,
+AppId,
+CreatedBy,
+CreatedByIP,
+Result,
+AdditionalDetails
+| order by TimeGenerated desc
+// Expected Output: All new application registrations
+// Common False Positives: Legitimate development, authorized integrations
+// Tuning: Alert on off-hours registrations, unexpected creators
+// ============================================================================
+// Query 7.2: Service Principal Sign-ins
+// Description: Monitor authentication by service principals and applications
+// Use Case: Track automated and service account access patterns
+// MITRE ATT&CK: T1078.004 - Cloud Accounts
+// Severity: Low
+// False Positive Rate: Low
+// ============================================================================
+AADServicePrincipalSignInLogs
+| where TimeGenerated > ago(7d)
+| where ResultType == “0”
+| summarize
+SignInCount = count(),
+UniqueIPs = dcount(IPAddress),
+IPs = make_set(IPAddress),
+Resources = make_set(ResourceDisplayName),
+LastSignIn = max(TimeGenerated)
+by ServicePrincipalName, AppId
+| order by SignInCount desc
+// Expected Output: Service principal authentication summary
+// Common False Positives: Expected automated processes
+// Tuning: Alert on unusual volume, new IPs, off-pattern access
+// ============================================================================
+// Query 7.3: Application Permission Changes
+// Description: Track changes to application permissions and consent
+// Use Case: Detect privilege escalation via app permissions
+// MITRE ATT&CK: T1098 - Account Manipulation
+// Severity: High
+// False Positive Rate: Low
+// ============================================================================
+AuditLogs
+| where TimeGenerated > ago(30d)
+| where OperationName in (
+“Add app role assignment to service principal”,
+“Add delegated permission grant”,
+“Add application”,
+“Update application - Certificates and secrets management”
+)
+| extend
+AppName = tostring(TargetResources[0].displayName),
+ModifiedBy = tostring(InitiatedBy.user.userPrincipalName),
+ModifiedByIP = tostring(InitiatedBy.user.ipAddress),
+Permissions = tostring(TargetResources[0].modifiedProperties)
+| project
+TimeGenerated,
+OperationName,
+AppName,
+ModifiedBy,
+ModifiedByIP,
+Permissions,
+Result
+| order by TimeGenerated desc
+// Expected Output: Application permission modifications
+// Common False Positives: Legitimate permission grants, app updates
+// Tuning: Alert on high-risk permissions (Mail.ReadWrite, Files.ReadWrite.All)
+// ============================================================================
+// Query 7.4: Service Principal Secret/Certificate Changes
+// Description: Detect when service principal secrets or certificates are added/updated
+// Use Case: Monitor for potential backdoor creation in applications
+// MITRE ATT&CK: T1098.001 - Additional Cloud Credentials
+// Severity: High
+// False Positive Rate: Low
+// ============================================================================
+AuditLogs
+| where TimeGenerated > ago(30d)
+| where OperationName in (
+“Add service principal credentials”,
+“Update service principal credentials”,
+“Remove service principal credentials”,
+“Update application - Certificates and secrets management”
+)
+| extend
+AppName = tostring(TargetResources[0].displayName),
+ModifiedBy = tostring(InitiatedBy.user.userPrincipalName),
+ModifiedByIP = tostring(InitiatedBy.user.ipAddress),
+CredentialType = tostring(TargetResources[0].modifiedProperties)
+| project
+TimeGenerated,
+OperationName,
+AppName,
+ModifiedBy,
+ModifiedByIP,
+CredentialType,
+Result,
+AdditionalDetails
+| order by TimeGenerated desc
+// Expected Output: Credential changes for service principals
+// Common False Positives: Routine credential rotation, maintenance
+// Tuning: Alert on unexpected modifiers, off-hours changes
+// ============================================================================
+// Query 7.5: Application Deletions
+// Description: Track when applications are removed from the tenant
+// Use Case: Detect cleanup after attack or unauthorized removal
+// MITRE ATT&CK: T1531 - Account Access Removal
+// Severity: Medium
+// False Positive Rate: Low
+// ============================================================================
+AuditLogs
+| where TimeGenerated > ago(30d)
+| where OperationName in (“Remove application”, “Delete service principal”)
+| extend
+AppName = tostring(TargetResources[0].displayName),
+DeletedBy = tostring(InitiatedBy.user.userPrincipalName),
+DeletedByIP = tostring(InitiatedBy.user.ipAddress),
+AppId = tostring(TargetResources[0].id)
+| project
+TimeGenerated,
+OperationName,
+AppName,
+AppId,
+DeletedBy,
+DeletedByIP,
+Result
+| order by TimeGenerated desc
+// Expected Output: Deleted applications and service principals
+// Common False Positives: Decommissioned apps, cleanup activities
+// Tuning: Alert on production apps, unexpected deleters
+// ============================================================================
+// Query 7.6: High-Risk Application Permissions Granted
+// Description: Detects when applications receive high-privilege permissions
+// Use Case: Monitor for over-privileged application access
+// MITRE ATT&CK: T1098 - Account Manipulation
+// Severity: High
+// False Positive Rate: Low
+// ============================================================================
+AuditLogs
+| where TimeGenerated > ago(30d)
+| where OperationName in (
+“Add app role assignment to service principal”,
+“Add delegated permission grant”
+)
+| extend Permissions = tostring(TargetResources[0].modifiedProperties)
+| where Permissions has_any (
+“Mail.ReadWrite”,
+“Mail.Send”,
+“Files.ReadWrite.All”,
+“Sites.ReadWrite.All”,
+“User.ReadWrite.All”,
+“Directory.ReadWrite.All”,
+“RoleManagement.ReadWrite.Directory”
+)
+| extend
+AppName = tostring(TargetResources[0].displayName),
+GrantedBy = tostring(InitiatedBy.user.userPrincipalName),
+GrantedByIP = tostring(InitiatedBy.user.ipAddress)
+| project
+TimeGenerated,
+AppName,
+Permissions,
+GrantedBy,
+GrantedByIP,
+Result
+| order by TimeGenerated desc
+// Expected Output: High-privilege permission grants
+// Common False Positives: Legitimate business applications
+// Tuning: Review all grants, validate business justification
+// ============================================================================
+// Query 7.7: Application Consent Grant Activity
+// Description: Monitors user and admin consent to applications
+// Use Case: Detect consent phishing or unauthorized app access
+// MITRE ATT&CK: T1528 - Steal Application Access Token
+// Severity: Medium
+// False Positive Rate: Medium
+// ============================================================================
+AuditLogs
+| where TimeGenerated > ago(30d)
+| where OperationName in (
+“Consent to application”,
+“Add delegated permission grant”,
+“Add OAuth2PermissionGrant”
+)
+| extend
+AppName = tostring(TargetResources[0].displayName),
+ConsentedBy = tostring(InitiatedBy.user.userPrincipalName),
+ConsentedByIP = tostring(InitiatedBy.user.ipAddress),
+ConsentType = tostring(AdditionalDetails),
+Permissions = tostring(TargetResources[0].modifiedProperties)
+| project
+TimeGenerated,
+OperationName,
+AppName,
+ConsentedBy,
+ConsentedByIP,
+ConsentType,
+Permissions,
+Result
+| order by TimeGenerated desc
+// Expected Output: Application consent activities
+// Common False Positives: Legitimate SaaS integrations
+// Tuning: Alert on user consent to unknown publishers, suspicious scopes
+// ============================================================================
+// Query 7.8: Service Principal Sign-ins from New IPs
+// Description: Detects service principals authenticating from previously unseen IPs
+// Use Case: Identify compromised service principal credentials
+// MITRE ATT&CK: T1078.004 - Cloud Accounts
+// Severity: Medium
+// False Positive Rate: Medium
+// ============================================================================
+let LookbackPeriod = 30d;
+let KnownSPIPs = AADServicePrincipalSignInLogs
+| where TimeGenerated between(ago(LookbackPeriod)..ago(1d))
+| where ResultType == “0”
+| summarize by ServicePrincipalName, IPAddress;
+AADServicePrincipalSignInLogs
+| where TimeGenerated > ago(1d)
+| where ResultType == “0”
+| join kind=leftanti KnownSPIPs on ServicePrincipalName, IPAddress
+| project
+TimeGenerated,
+ServicePrincipalName,
+AppId,
+IPAddress,
+ResourceDisplayName,
+ResultType
+| order by TimeGenerated desc
+// Expected Output: Service principals from new IPs
+// Common False Positives: Cloud service IP changes, new deployments
+// Tuning: Exclude known cloud provider ranges, alert on sensitive apps
+// ============================================================================
+// Query 7.9: Application with Multiple Failed Sign-ins
+// Description: Service principals with authentication failures
+// Use Case: Detect expired credentials or potential brute force
+// MITRE ATT&CK: T1110 - Brute Force
+// Severity: Medium
+// False Positive Rate: Low
+// ============================================================================
+AADServicePrincipalSignInLogs
+| where TimeGenerated > ago(24h)
+| where ResultType != “0”
+| summarize
+FailureCount = count(),
+ErrorCodes = make_set(ResultType),
+IPs = make_set(IPAddress),
+Resources = make_set(ResourceDisplayName),
+LastFailure = max(TimeGenerated)
+by ServicePrincipalName, AppId
+| where FailureCount > 10
+| order by FailureCount desc
+// Expected Output: Service principals with many failures
+// Common False Positives: Expired secrets, misconfiguration
+// Tuning: Alert on sudden spikes, credential rotation needed
+// ============================================================================
+// Query 7.10: OAuth2 Application Permissions by App
+// Description: Inventory of application permissions across tenant
+// Use Case: Audit application permission landscape
+// MITRE ATT&CK: N/A
+// Severity: Informational
+// False Positive Rate: N/A
+// ============================================================================
+AuditLogs
+| where TimeGenerated > ago(90d)
+| where OperationName in (
+“Add app role assignment to service principal”,
+“Add delegated permission grant”
+)
+| extend
+AppName = tostring(TargetResources[0].displayName),
+Permissions = tostring(TargetResources[0].modifiedProperties)
+| summarize
+PermissionCount = count(),
+LastGranted = max(TimeGenerated),
+GrantedBy = make_set(tostring(InitiatedBy.user.userPrincipalName))
+by AppName
+| order by PermissionCount desc
+// Expected Output: Application permission counts
+// Common False Positives: N/A - inventory query
+// Tuning: Use for periodic reviews, identify over-privileged apps
+// ============================================================================
+// Query 7.11: Multi-Tenant Application Access
+// Description: Detects when applications from other tenants access resources
+// Use Case: Monitor external application access
+// MITRE ATT&CK: T1550 - Use Alternate Authentication Material
+// Severity: Medium
+// False Positive Rate: Medium
+// ============================================================================
+AADServicePrincipalSignInLogs
+| where TimeGenerated > ago(7d)
+| where ResultType == “0”
+| where ServicePrincipalId != AppId  // Different tenant
+| summarize
+AccessCount = count(),
+Resources = make_set(ResourceDisplayName),
+IPs = make_set(IPAddress),
+LastAccess = max(TimeGenerated)
+by ServicePrincipalName, AppId
+| order by AccessCount desc
+// Expected Output: External tenant application access
+// Common False Positives: Legitimate SaaS services, partner apps
+// Tuning: Whitelist known partners, alert on unexpected apps
+// ============================================================================
+// Query 7.12: Application Owner Changes
+// Description: Tracks when application ownership is modified
+// Use Case: Detect unauthorized ownership transfers
+// MITRE ATT&CK: T1098 - Account Manipulation
+// Severity: High
+// False Positive Rate: Low
+// ============================================================================
+AuditLogs
+| where TimeGenerated > ago(30d)
+| where OperationName in (
+“Add owner to application”,
+“Remove owner from application”
+)
+| extend
+AppName = tostring(TargetResources[0].displayName),
+Owner = tostring(TargetResources[1].userPrincipalName),
+ModifiedBy = tostring(InitiatedBy.user.userPrincipalName),
+ModifiedByIP = tostring(InitiatedBy.user.ipAddress)
+| project
+TimeGenerated,
+OperationName,
+AppName,
+Owner,
+ModifiedBy,
+ModifiedByIP,
+Result
+| order by TimeGenerated desc
+// Expected Output: Application ownership changes
+// Common False Positives: Team changes, organizational restructuring
+// Tuning: Alert on critical apps, validate all changes
+// ============================================================================
+// Query 7.13: Application Authentication Methods Changed
+// Description: Monitors changes to app authentication configuration
+// Use Case: Detect security downgrade or backdoor creation
+// MITRE ATT&CK: T1556 - Modify Authentication Process
+// Severity: High
+// False Positive Rate: Low
+// ============================================================================
+AuditLogs
+| where TimeGenerated > ago(30d)
+| where OperationName in (
+“Update application”,
+“Update service principal”
+)
+| where AdditionalDetails has “passwordCredentials” or AdditionalDetails has “keyCredentials”
+| extend
+AppName = tostring(TargetResources[0].displayName),
+ModifiedBy = tostring(InitiatedBy.user.userPrincipalName),
+ModifiedByIP = tostring(InitiatedBy.user.ipAddress),
+Changes = tostring(TargetResources[0].modifiedProperties)
+| project
+TimeGenerated,
+AppName,
+ModifiedBy,
+ModifiedByIP,
+Changes,
+Result
+| order by TimeGenerated desc
+// Expected Output: Authentication method modifications
+// Common False Positives: Routine updates, security improvements
+// Tuning: Review all changes, validate security posture
+// ============================================================================
+// Query 7.14: Bulk Application Permission Grants
+// Description: Detects when multiple permissions are granted rapidly
+// Use Case: Identify potential privilege escalation campaigns
+// MITRE ATT&CK: T1098 - Account Manipulation
+// Severity: High
+// False Positive Rate: Low
+// ============================================================================
+AuditLogs
+| where TimeGenerated > ago(24h)
+| where OperationName in (
+“Add app role assignment to service principal”,
+“Add delegated permission grant”
+)
+| extend GrantedBy = tostring(InitiatedBy.user.userPrincipalName)
+| summarize
+GrantCount = count(),
+Apps = make_set(tostring(TargetResources[0].displayName)),
+FirstGrant = min(TimeGenerated),
+LastGrant = max(TimeGenerated)
+by GrantedBy
+| where GrantCount >= 5
+| extend TimeSpan = datetime_diff(‘minute’, LastGrant, FirstGrant)
+| project GrantedBy, GrantCount, TimeSpan, Apps, FirstGrant
+| order by GrantCount desc
+// Expected Output: Rapid permission grant activity
+// Common False Positives: App deployment, migration activities
+// Tuning: Adjust grant count threshold, exclude deployment accounts
+// ============================================================================
+// ADDITIONAL NOTES
+// ============================================================================
+//
+// Critical Application Events to Monitor:
+// - New application registrations
+// - High-privilege permission grants
+// - Service principal credential changes
+// - Application consent (especially user consent)
+// - Application ownership changes
+// - Authentication method modifications
+// - Application deletions
+//
+// High-Risk Application Permissions:
+// Graph API:
+// - Directory.ReadWrite.All
+// - RoleManagement.ReadWrite.Directory
+// - User.ReadWrite.All
+// - Group.ReadWrite.All
+//
+// Exchange:
+// - Mail.ReadWrite
+// - Mail.Send
+// - MailboxSettings.ReadWrite
+//
+// SharePoint:
+// - Files.ReadWrite.All
+// - Sites.ReadWrite.All
+//
+// Security Center:
+// - SecurityEvents.ReadWrite.All
+// - ThreatIndicators.ReadWrite.OwnedBy
+//
+// Application Security Best Practices:
+// 1. Principle of least privilege for app permissions
+// 2. Regular permission audits (quarterly)
+// 3. Disable user consent or limit to verified publishers
+// 4. Implement app governance policies
+// 5. Monitor service principal activity
+// 6. Rotate credentials regularly (90 days)
+// 7. Use certificates over secrets where possible
+// 8. Document all applications and their purpose
+//
+// Service Principal Monitoring:
+// - Track authentication patterns
+// - Monitor for credential failures
+// - Alert on new IP addresses
+// - Review resource access
+// - Validate ownership
+//
+// Consent Phishing Indicators:
+// - Suspicious app names (typosquatting)
+// - Unusual permission requests
+// - Non-verified publishers
+// - Bulk consent requests
+// - Off-hours consent activity
+//
+// Integration Points:
+// - Microsoft Defender for Cloud Apps
+// - Azure AD Identity Governance
+// - Microsoft Defender for Endpoint
+// - SIEM/SOAR platforms
+//
+// Compliance Requirements:
+// - SOC 2: Application access controls
+// - ISO 27001: Least privilege
+// - NIST: Application security
+// - GDPR: Data access auditing
+//
+// Response Actions:
+// Critical: Revoke permissions, disable app, investigate
+// High: Review permissions, validate usage, monitor
+// Medium: Document, schedule review, assess risk
+// Low: Inventory, periodic audit
+//
+// ============================================================================
