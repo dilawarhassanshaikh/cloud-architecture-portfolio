@@ -1,0 +1,375 @@
+// ============================================================================
+// FILE: 02-suspicious-activities.kql
+// CATEGORY: Suspicious Activities Detection
+// DESCRIPTION: Detect anomalous and potentially malicious authentication patterns
+// LAST UPDATED: January 2026
+// ============================================================================
+
+// ============================================================================
+// Query 2.1: Sign-ins from Tor Network or Anonymizers
+// Description: Detects authentication attempts from Tor exit nodes or anonymizers
+// Use Case: Identify attempts to hide origin of authentication
+// MITRE ATT&CK: T1090 - Proxy
+// Severity: High
+// False Positive Rate: Low
+// ============================================================================
+SigninLogs
+| where TimeGenerated > ago(7d)
+| where NetworkLocationDetails contains "tor" 
+    or NetworkLocationDetails contains "anonymizer"
+    or NetworkLocationDetails contains "proxy"
+    or NetworkLocationDetails contains "vpn"
+| project 
+    TimeGenerated, 
+    UserPrincipalName, 
+    IPAddress, 
+    Location, 
+    ResultType,
+    AppDisplayName, 
+    NetworkLocationDetails, 
+    RiskLevelDuringSignIn,
+    DeviceDetail
+| order by TimeGenerated desc
+
+// Expected Output: Authentications from anonymized networks
+// Common False Positives: Legitimate VPN usage, privacy-conscious users
+// Tuning: Exclude known corporate VPN IPs, whitelist legitimate users
+
+
+// ============================================================================
+// Query 2.2: Legacy Authentication Protocol Usage
+// Description: Identifies use of legacy authentication protocols (security risk)
+// Use Case: Detect security risks from outdated authentication methods
+// MITRE ATT&CK: T1078 - Valid Accounts
+// Severity: Medium
+// False Positive Rate: Medium
+// ============================================================================
+SigninLogs
+| where TimeGenerated > ago(30d)
+| where ClientAppUsed in (
+    "Other clients", 
+    "IMAP", 
+    "POP", 
+    "SMTP", 
+    "Exchange ActiveSync", 
+    "Authenticated SMTP",
+    "AutoDiscover", 
+    "Exchange Online PowerShell",
+    "Exchange Web Services",
+    "MAPI Over HTTP",
+    "Offline Address Book"
+)
+| summarize 
+    Count = count(), 
+    LastSeen = max(TimeGenerated),
+    FirstSeen = min(TimeGenerated),
+    IPAddresses = make_set(IPAddress),
+    Locations = make_set(Location)
+    by UserPrincipalName, ClientAppUsed, AppDisplayName
+| extend DaysActive = datetime_diff('day', LastSeen, FirstSeen)
+| order by Count desc
+
+// Expected Output: Users still using legacy authentication
+// Common False Positives: Legacy email clients, old mobile devices
+// Tuning: Create migration plan, exclude users during transition period
+
+
+// ============================================================================
+// Query 2.3: Sign-ins Outside Business Hours
+// Description: Detects authentication during non-business hours
+// Use Case: Identify suspicious off-hours access patterns
+// MITRE ATT&CK: T1078 - Valid Accounts
+// Severity: Low to Medium
+// False Positive Rate: High
+// ============================================================================
+SigninLogs
+| where TimeGenerated > ago(7d)
+| where ResultType == "0"
+| extend 
+    Hour = datetime_part("hour", TimeGenerated),
+    DayOfWeek = dayofweek(TimeGenerated)
+| where 
+    Hour < 7 or Hour > 19  // Outside 7 AM - 7 PM
+    or DayOfWeek == 0day  // Sunday
+    or DayOfWeek == 6day  // Saturday
+| project 
+    TimeGenerated, 
+    UserPrincipalName, 
+    Hour,
+    DayOfWeek,
+    Location, 
+    IPAddress, 
+    AppDisplayName, 
+    DeviceDetail
+| order by TimeGenerated desc
+
+// Expected Output: Off-hours authentications
+// Common False Positives: Remote workers, international teams, on-call staff
+// Tuning: Adjust hours for your timezone, exclude 24/7 support staff
+
+
+// ============================================================================
+// Query 2.4: Distributed Password Spray Attack
+// Description: Identifies potential password spray attacks across multiple users
+// Use Case: Detect coordinated authentication attacks
+// MITRE ATT&CK: T1110.003 - Password Spraying
+// Severity: Critical
+// False Positive Rate: Low
+// ============================================================================
+SigninLogs
+| where TimeGenerated > ago(1h)
+| where ResultType != "0"
+| summarize 
+    UniqueUsers = dcount(UserPrincipalName),
+    Users = make_set(UserPrincipalName),
+    AttemptCount = count(),
+    Apps = make_set(AppDisplayName),
+    ErrorCodes = make_set(ResultType)
+    by IPAddress, bin(TimeGenerated, 5m), Location
+| where UniqueUsers > 10 and AttemptCount > 20
+| extend AttackPattern = case(
+    UniqueUsers > 50, "Large-scale spray",
+    UniqueUsers > 25, "Medium-scale spray",
+    "Small-scale spray"
+)
+| order by AttemptCount desc
+
+// Expected Output: IPs attacking many accounts in short time
+// Common False Positives: Shared corporate IPs with legitimate failures
+// Tuning: Adjust user/attempt thresholds, whitelist corporate IP ranges
+
+
+// ============================================================================
+// Query 2.5: Suspicious User Agent Strings
+// Description: Detects unusual or automated tool user agents
+// Use Case: Identify automated tools or malicious scripts
+// MITRE ATT&CK: T1189 - Drive-by Compromise
+// Severity: Medium
+// False Positive Rate: Medium
+// ============================================================================
+SigninLogs
+| where TimeGenerated > ago(7d)
+| where UserAgent contains "python" 
+    or UserAgent contains "curl"
+    or UserAgent contains "wget"
+    or UserAgent contains "powershell"
+    or UserAgent contains "bot"
+    or UserAgent contains "script"
+    or UserAgent startswith "Go-http"
+    or UserAgent contains "automation"
+    or UserAgent contains "selenium"
+| project 
+    TimeGenerated, 
+    UserPrincipalName, 
+    UserAgent, 
+    IPAddress, 
+    Location, 
+    ResultType, 
+    AppDisplayName,
+    ClientAppUsed
+| order by TimeGenerated desc
+
+// Expected Output: Non-standard user agents accessing Entra ID
+// Common False Positives: Legitimate automation, API clients, dev tools
+// Tuning: Whitelist known automation accounts, API service principals
+
+
+// ============================================================================
+// Query 2.6: Rapid Sign-ins from Multiple Locations
+// Description: Detects sign-ins from multiple countries within short timeframe
+// Use Case: Identify potential account sharing or compromise
+// MITRE ATT&CK: T1078 - Valid Accounts
+// Severity: Medium
+// False Positive Rate: Medium
+// ============================================================================
+SigninLogs
+| where TimeGenerated > ago(1h)
+| where ResultType == "0"
+| where isnotempty(Location)
+| summarize 
+    Countries = dcount(Location),
+    Locations = make_set(Location),
+    SignInCount = count(),
+    IPs = make_set(IPAddress),
+    FirstSignIn = min(TimeGenerated),
+    LastSignIn = max(TimeGenerated)
+    by UserPrincipalName, bin(TimeGenerated, 1h)
+| where Countries >= 3  // 3+ different locations
+| extend TimeSpan = datetime_diff('minute', LastSignIn, FirstSignIn)
+| project 
+    TimeGenerated, 
+    UserPrincipalName, 
+    Countries, 
+    Locations, 
+    SignInCount, 
+    TimeSpan,
+    IPs
+| order by Countries desc
+
+// Expected Output: Accounts accessing from multiple locations rapidly
+// Common False Positives: VPN users, traveling executives, mobile workers
+// Tuning: Increase location count threshold, exclude known VPN users
+
+
+// ============================================================================
+// Query 2.7: Sign-ins with Interrupted Authentication Flow
+// Description: Detects interrupted sign-ins that may indicate attacks
+// Use Case: Identify suspicious authentication patterns
+// MITRE ATT&CK: T1110 - Brute Force
+// Severity: Low
+// False Positive Rate: Medium
+// ============================================================================
+SigninLogs
+| where TimeGenerated > ago(24h)
+| where ResultType in (
+    "50074",  // MFA required
+    "50076",  // MFA required (strongAuth)
+    "50079",  // MFA required (enforced)
+    "50072",  // User sign-in blocked
+    "50097",  // Device authentication required
+    "53000",  // Device is not compliant
+    "53003"   // Blocked by conditional access
+)
+| summarize 
+    InterruptedCount = count(),
+    ErrorTypes = make_set(ResultType),
+    LastOccurrence = max(TimeGenerated),
+    IPs = make_set(IPAddress),
+    Locations = make_set(Location)
+    by UserPrincipalName, AppDisplayName
+| where InterruptedCount >= 5
+| order by InterruptedCount desc
+
+// Expected Output: Accounts with frequent authentication interruptions
+// Common False Positives: MFA enrollment, non-compliant devices, policy changes
+// Tuning: Increase threshold, filter by specific error codes
+
+
+// ============================================================================
+// Query 2.8: Authentication from Cloud Provider IPs
+// Description: Detects sign-ins from cloud hosting providers (AWS, Azure, GCP)
+// Use Case: Identify potential command & control or compromised infrastructure
+// MITRE ATT&CK: T1078 - Valid Accounts
+// Severity: Medium
+// False Positive Rate: High
+// ============================================================================
+SigninLogs
+| where TimeGenerated > ago(7d)
+| where NetworkLocationDetails contains "aws"
+    or NetworkLocationDetails contains "amazon"
+    or NetworkLocationDetails contains "azure"
+    or NetworkLocationDetails contains "google cloud"
+    or NetworkLocationDetails contains "gcp"
+    or NetworkLocationDetails contains "digital ocean"
+    or NetworkLocationDetails contains "linode"
+    or NetworkLocationDetails contains "vultr"
+| where ResultType == "0"
+| project 
+    TimeGenerated,
+    UserPrincipalName,
+    IPAddress,
+    Location,
+    NetworkLocationDetails,
+    AppDisplayName,
+    DeviceDetail
+| order by TimeGenerated desc
+
+// Expected Output: Sign-ins from cloud hosting providers
+// Common False Positives: Legitimate cloud-hosted apps, developers, CI/CD
+// Tuning: Whitelist known cloud resources, exclude service accounts
+
+
+// ============================================================================
+// Query 2.9: First-Time Sign-in from New Application
+// Description: Detects when users authenticate to apps they haven't used before
+// Use Case: Identify potential unauthorized app access
+// MITRE ATT&CK: T1078 - Valid Accounts
+// Severity: Low
+// False Positive Rate: High
+// ============================================================================
+let LookbackPeriod = 30d;
+let KnownUserApps = SigninLogs
+    | where TimeGenerated between(ago(LookbackPeriod)..ago(1d))
+    | where ResultType == "0"
+    | summarize by UserPrincipalName, AppDisplayName;
+SigninLogs
+| where TimeGenerated > ago(1d)
+| where ResultType == "0"
+| join kind=leftanti KnownUserApps on UserPrincipalName, AppDisplayName
+| project 
+    TimeGenerated,
+    UserPrincipalName,
+    AppDisplayName,
+    IPAddress,
+    Location,
+    DeviceDetail,
+    ConditionalAccessStatus
+| order by TimeGenerated desc
+
+// Expected Output: Users accessing new applications
+// Common False Positives: New app deployments, normal user behavior
+// Tuning: Adjust lookback period, focus on sensitive apps only
+
+
+// ============================================================================
+// Query 2.10:异常登录时间模式 (Abnormal Time Pattern Logins)
+// Description: Statistical detection of abnormal login times for users
+// Use Case: ML-style detection of unusual behavior
+// MITRE ATT&CK: T1078 - Valid Accounts
+// Severity: Medium
+// False Positive Rate: Medium
+// ============================================================================
+let UserBaseline = SigninLogs
+    | where TimeGenerated between(ago(30d)..ago(1d))
+    | where ResultType == "0"
+    | extend Hour = datetime_part("hour", TimeGenerated)
+    | summarize 
+        AvgHour = avg(Hour),
+        StdDevHour = stdev(Hour)
+        by UserPrincipalName;
+SigninLogs
+| where TimeGenerated > ago(1d)
+| where ResultType == "0"
+| extend Hour = datetime_part("hour", TimeGenerated)
+| join kind=inner UserBaseline on UserPrincipalName
+| extend Deviation = abs(Hour - AvgHour)
+| where Deviation > (StdDevHour * 2)  // 2 standard deviations
+| project 
+    TimeGenerated,
+    UserPrincipalName,
+    Hour,
+    AvgHour,
+    Deviation,
+    IPAddress,
+    Location
+| order by Deviation desc
+
+// Expected Output: Users logging in at unusual times for them
+// Common False Positives: Schedule changes, travel, emergencies
+// Tuning: Adjust standard deviation multiplier (2 is standard)
+
+
+// ============================================================================
+// ADDITIONAL NOTES
+// ============================================================================
+//
+// Priority Detection Recommendations:
+// 1. Query 2.4 (Password Spray) - Enable as real-time alert
+// 2. Query 2.1 (Tor/Anonymizer) - High priority investigation
+// 3. Query 2.2 (Legacy Auth) - Track for migration planning
+// 4. Query 2.6 (Multiple Locations) - Medium priority review
+//
+// Investigation Workflow:
+// 1. Verify if activity is legitimate with user
+// 2. Check for concurrent risky activities
+// 3. Review recent account changes
+// 4. Assess potential impact/data access
+// 5. Implement containment if confirmed malicious
+//
+// Integration Tips:
+// - Correlate with Azure AD Risk Events
+// - Cross-reference with Office 365 audit logs
+// - Check for concurrent suspicious file access
+// - Look for privilege escalation attempts
+//
+// ============================================================================
