@@ -24,3 +24,4 @@ across enterprise and public-sector environments.
 ## 📫 Connect
 - LinkedIn: https://linkedin.com/in/dilawarshaikh
 - GitHub: https://github.com/dilawarhassanshaikh
+- Gmail: dilawarshaikh0@gmail.com
