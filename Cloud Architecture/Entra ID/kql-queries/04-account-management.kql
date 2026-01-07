@@ -1,0 +1,395 @@
+// ============================================================================
+// FILE: 04-account-management.kql
+// CATEGORY: Account Management & Lifecycle
+// DESCRIPTION: Track user account creation, modification, and deletion events
+// LAST UPDATED: January 2026
+// ============================================================================
+// ============================================================================
+// Query 4.1: Recently Created User Accounts
+// Description: Lists user accounts created in the specified timeframe
+// Use Case: Monitor new account creation for unauthorized additions
+// MITRE ATT&CK: T1136.003 - Create Account: Cloud Account
+// Severity: Medium
+// False Positive Rate: Low
+// ============================================================================
+AuditLogs
+| where TimeGenerated > ago(7d)
+| where OperationName == “Add user”
+| extend
+NewUser = tostring(TargetResources[0].userPrincipalName),
+CreatedBy = tostring(InitiatedBy.user.userPrincipalName),
+CreatedByIP = tostring(InitiatedBy.user.ipAddress),
+UserType = tostring(TargetResources[0].userPrincipalName)
+| project
+TimeGenerated,
+NewUser,
+CreatedBy,
+CreatedByIP,
+Result,
+AdditionalDetails,
+CorrelationId
+| order by TimeGenerated desc
+// Expected Output: All newly created user accounts
+// Common False Positives: Legitimate new hires, contractors
+// Tuning: Alert on bulk creations, off-hours, or unexpected creators
+// ============================================================================
+// Query 4.2: Deleted User Accounts
+// Description: Tracks recently deleted user accounts
+// Use Case: Monitor account deletions for unauthorized or suspicious activity
+// MITRE ATT&CK: T1531 - Account Access Removal
+// Severity: Medium
+// False Positive Rate: Low
+// ============================================================================
+AuditLogs
+| where TimeGenerated > ago(30d)
+| where OperationName == “Delete user”
+| extend
+DeletedUser = tostring(TargetResources[0].userPrincipalName),
+DeletedBy = tostring(InitiatedBy.user.userPrincipalName),
+DeletedByIP = tostring(InitiatedBy.user.ipAddress)
+| project
+TimeGenerated,
+DeletedUser,
+DeletedBy,
+DeletedByIP,
+Result,
+AdditionalDetails
+| order by TimeGenerated desc
+// Expected Output: All deleted user accounts
+// Common False Positives: Employee departures, cleanup activities
+// Tuning: Alert on bulk deletions, unexpected deleters
+// ============================================================================
+// Query 4.3: Password Reset Activities
+// Description: Monitors password resets for all users
+// Use Case: Detect potential account compromise or unauthorized resets
+// MITRE ATT&CK: T1098 - Account Manipulation
+// Severity: Medium
+// False Positive Rate: Medium
+// ============================================================================
+AuditLogs
+| where TimeGenerated > ago(7d)
+| where OperationName in (
+“Reset password (by admin)”,
+“Change password (self-service)”,
+“Reset password (self-service)”,
+“Change user password”
+)
+| extend
+AffectedUser = tostring(TargetResources[0].userPrincipalName),
+InitiatorUser = tostring(InitiatedBy.user.userPrincipalName),
+InitiatorIP = tostring(InitiatedBy.user.ipAddress)
+| project
+TimeGenerated,
+OperationName,
+AffectedUser,
+InitiatorUser,
+InitiatorIP,
+Result,
+AdditionalDetails
+| order by TimeGenerated desc
+// Expected Output: All password reset activities
+// Common False Positives: Legitimate password resets, help desk activity
+// Tuning: Focus on admin-initiated resets, bulk operations
+// ============================================================================
+// Query 4.4: Guest User Invitations
+// Description: Tracks guest user invitations and redemptions
+// Use Case: Monitor external user access to environment
+// MITRE ATT&CK: T1078 - Valid Accounts
+// Severity: Low
+// False Positive Rate: Low
+// ============================================================================
+AuditLogs
+| where TimeGenerated > ago(30d)
+| where OperationName in (
+“Invite external user”,
+“Redeem external user invite”
+)
+| extend
+GuestEmail = tostring(TargetResources[0].userPrincipalName),
+InvitedBy = tostring(InitiatedBy.user.userPrincipalName),
+InvitedByIP = tostring(InitiatedBy.user.ipAddress),
+InvitedTo = tostring(TargetResources[0].modifiedProperties)
+| project
+TimeGenerated,
+OperationName,
+GuestEmail,
+InvitedBy,
+InvitedByIP,
+Result,
+AdditionalDetails
+| order by TimeGenerated desc
+// Expected Output: Guest user invitation activity
+// Common False Positives: Legitimate partner/vendor collaboration
+// Tuning: Monitor for unusual inviter accounts, bulk invitations
+// ============================================================================
+// Query 4.5: User Property Changes
+// Description: Detects modifications to user account properties
+// Use Case: Track changes to user attributes that could indicate compromise
+// MITRE ATT&CK: T1098 - Account Manipulation
+// Severity: Low to Medium
+// False Positive Rate: Medium
+// ============================================================================
+AuditLogs
+| where TimeGenerated > ago(7d)
+| where OperationName == “Update user”
+| extend
+ModifiedUser = tostring(TargetResources[0].userPrincipalName),
+ModifiedBy = tostring(InitiatedBy.user.userPrincipalName),
+ModifiedByIP = tostring(InitiatedBy.user.ipAddress),
+ModifiedProperties = TargetResources[0].modifiedProperties
+| project
+TimeGenerated,
+ModifiedUser,
+ModifiedBy,
+ModifiedByIP,
+ModifiedProperties,
+Result,
+AdditionalDetails
+| order by TimeGenerated desc
+// Expected Output: User property modifications
+// Common False Positives: Normal profile updates, HR changes
+// Tuning: Focus on security-relevant properties (MFA, roles, forwarding)
+// ============================================================================
+// Query 4.6: Bulk User Creation Activity
+// Description: Detects creation of multiple user accounts in short time
+// Use Case: Identify potential unauthorized bulk user provisioning
+// MITRE ATT&CK: T1136.003 - Create Account: Cloud Account
+// Severity: High
+// False Positive Rate: Low
+// ============================================================================
+AuditLogs
+| where TimeGenerated > ago(24h)
+| where OperationName == “Add user”
+| extend
+CreatedBy = tostring(InitiatedBy.user.userPrincipalName),
+CreatedByIP = tostring(InitiatedBy.user.ipAddress)
+| summarize
+UserCount = count(),
+Users = make_list(tostring(TargetResources[0].userPrincipalName)),
+FirstCreation = min(TimeGenerated),
+LastCreation = max(TimeGenerated)
+by CreatedBy, CreatedByIP
+| where UserCount >= 5  // 5 or more users created
+| extend TimeSpan = datetime_diff(‘minute’, LastCreation, FirstCreation)
+| project CreatedBy, CreatedByIP, UserCount, TimeSpan, FirstCreation, Users
+| order by UserCount desc
+// Expected Output: Accounts that created multiple users
+// Common False Positives: Onboarding periods, automated provisioning
+// Tuning: Adjust count threshold, whitelist HR/IT accounts
+// ============================================================================
+// Query 4.7: User License Assignment Changes
+// Description: Tracks license assignments and removals
+// Use Case: Monitor for unauthorized license changes
+// MITRE ATT&CK: T1098 - Account Manipulation
+// Severity: Low
+// False Positive Rate: Medium
+// ============================================================================
+AuditLogs
+| where TimeGenerated > ago(7d)
+| where OperationName in (
+“Assign license to user”,
+“Remove license from user”
+)
+| extend
+AffectedUser = tostring(TargetResources[0].userPrincipalName),
+ChangedBy = tostring(InitiatedBy.user.userPrincipalName),
+LicenseInfo = tostring(TargetResources[0].modifiedProperties)
+| project
+TimeGenerated,
+OperationName,
+AffectedUser,
+ChangedBy,
+LicenseInfo,
+Result
+| order by TimeGenerated desc
+// Expected Output: License assignment changes
+// Common False Positives: Normal license management, cost optimization
+// Tuning: Alert on premium license assignments, bulk changes
+// ============================================================================
+// Query 4.8: User Account Disabled/Enabled
+// Description: Monitors account enable/disable operations
+// Use Case: Detect unauthorized account status changes
+// MITRE ATT&CK: T1098 - Account Manipulation
+// Severity: Medium
+// False Positive Rate: Low
+// ============================================================================
+AuditLogs
+| where TimeGenerated > ago(30d)
+| where OperationName in (
+“Disable account”,
+“Enable account”
+)
+| extend
+AffectedUser = tostring(TargetResources[0].userPrincipalName),
+ChangedBy = tostring(InitiatedBy.user.userPrincipalName),
+ChangedByIP = tostring(InitiatedBy.user.ipAddress)
+| project
+TimeGenerated,
+OperationName,
+AffectedUser,
+ChangedBy,
+ChangedByIP,
+Result,
+AdditionalDetails
+| order by TimeGenerated desc
+// Expected Output: Account status changes
+// Common False Positives: Employee departures/returns, security measures
+// Tuning: Alert on bulk operations, unexpected operators
+// ============================================================================
+// Query 4.9: Guest User Activity After Invitation
+// Description: Correlates guest invitations with their first sign-in
+// Use Case: Monitor guest user onboarding and access patterns
+// MITRE ATT&CK: T1078 - Valid Accounts
+// Severity: Low
+// False Positive Rate: Low
+// ============================================================================
+let GuestInvites = AuditLogs
+| where TimeGenerated > ago(30d)
+| where OperationName == “Invite external user”
+| extend GuestEmail = tostring(TargetResources[0].userPrincipalName)
+| project InviteTime = TimeGenerated, GuestEmail;
+SigninLogs
+| where TimeGenerated > ago(30d)
+| where UserType == “Guest”
+| where ResultType == “0”
+| summarize FirstSignIn = min(TimeGenerated) by UserPrincipalName
+| join kind=inner GuestInvites on $left.UserPrincipalName == $right.GuestEmail
+| extend TimeBetween = datetime_diff(‘hour’, FirstSignIn, InviteTime)
+| project GuestEmail, InviteTime, FirstSignIn, TimeBetween
+| order by FirstSignIn desc
+// Expected Output: Guest invitation to first sign-in timeline
+// Common False Positives: Normal guest user workflow
+// Tuning: Alert on very fast redemption (potential automation)
+// ============================================================================
+// Query 4.10: Orphaned Accounts - No Recent Sign-in
+// Description: Identifies user accounts that haven’t signed in recently
+// Use Case: Find dormant accounts that should be disabled
+// MITRE ATT&CK: T1078 - Valid Accounts
+// Severity: Low
+// False Positive Rate: Medium
+// ============================================================================
+let InactivityThreshold = 90d;
+let ActiveUsers = SigninLogs
+| where TimeGenerated > ago(InactivityThreshold)
+| where ResultType == “0”
+| distinct UserPrincipalName;
+IdentityInfo
+| where TimeGenerated > ago(1d)
+| where AccountEnabled == true
+| where UserPrincipalName !endswith “#EXT#”  // Exclude guest accounts
+| where UserPrincipalName !in (ActiveUsers)
+| project
+UserPrincipalName,
+AccountEnabled,
+AssignedRoles,
+Department,
+JobTitle
+| order by UserPrincipalName asc
+// Expected Output: Accounts with no sign-ins in threshold period
+// Common False Positives: Emergency accounts, service accounts, break glass
+// Tuning: Adjust threshold, exclude known emergency accounts
+// ============================================================================
+// Query 4.11: User Creation and Immediate Role Assignment
+// Description: Detects accounts created and given roles immediately
+// Use Case: Identify potential privilege escalation via new accounts
+// MITRE ATT&CK: T1136.003 - Create Account: Cloud Account
+// Severity: High
+// False Positive Rate: Low
+// ============================================================================
+let UserCreations = AuditLogs
+| where TimeGenerated > ago(24h)
+| where OperationName == “Add user”
+| extend NewUser = tostring(TargetResources[0].userPrincipalName)
+| project CreationTime = TimeGenerated, NewUser;
+AuditLogs
+| where TimeGenerated > ago(24h)
+| where OperationName == “Add member to role”
+| extend
+AssignedUser = tostring(TargetResources[1].userPrincipalName),
+RoleName = tostring(TargetResources[0].displayName)
+| join kind=inner UserCreations on $left.AssignedUser == $right.NewUser
+| extend TimeDiff = datetime_diff(‘minute’, TimeGenerated, CreationTime)
+| where TimeDiff <= 60  // Within 60 minutes
+| project
+CreationTime,
+AssignedUser,
+RoleName,
+TimeDiff,
+AssignedBy = tostring(InitiatedBy.user.userPrincipalName)
+| order by TimeDiff asc
+// Expected Output: New accounts with rapid role assignment
+// Common False Positives: Automated provisioning, emergency access
+// Tuning: Adjust time window, focus on admin roles
+// ============================================================================
+// Query 4.12: Account Lockout Events
+// Description: Monitors user account lockouts
+// Use Case: Detect potential brute force or authentication attacks
+// MITRE ATT&CK: T1110 - Brute Force
+// Severity: Medium
+// False Positive Rate: Medium
+// ============================================================================
+SigninLogs
+| where TimeGenerated > ago(7d)
+| where ResultType in (
+“50053”,  // Account locked
+“50057”,  // Account disabled
+“50055”   // Password expired
+)
+| summarize
+LockoutCount = count(),
+FirstLockout = min(TimeGenerated),
+LastLockout = max(TimeGenerated),
+IPs = make_set(IPAddress),
+Locations = make_set(Location)
+by UserPrincipalName, ResultType
+| extend ResultDescription = case(
+ResultType == “50053”, “Account Locked”,
+ResultType == “50057”, “Account Disabled”,
+ResultType == “50055”, “Password Expired”,
+“Other”
+)
+| project
+UserPrincipalName,
+ResultDescription,
+LockoutCount,
+FirstLockout,
+LastLockout,
+IPs,
+Locations
+| order by LockoutCount desc
+// Expected Output: Accounts experiencing lockouts
+// Common False Positives: Password issues, legitimate failed attempts
+// Tuning: Focus on high lockout counts, multiple IPs
+// ============================================================================
+// ADDITIONAL NOTES
+// ============================================================================
+//
+// Key Account Management Events to Monitor:
+// - User creation and deletion
+// - Password changes (especially by admins)
+// - Account enable/disable operations
+// - License assignments
+// - Guest user invitations
+// - Property changes (email, phone, manager)
+//
+// Security Best Practices:
+// 1. Regular dormant account reviews (quarterly)
+// 2. Guest user access reviews (monthly)
+// 3. Automated account lifecycle management
+// 4. Separation of duties for account creation
+// 5. MFA enforcement for all users
+// 6. Regular password rotation policies
+//
+// Integration Points:
+// - HR systems for employee lifecycle
+// - Identity governance tools
+// - Help desk ticketing systems
+// - Automated provisioning workflows
+//
+// Compliance Considerations:
+// - SOX: User access reviews
+// - GDPR: Data subject deletion tracking
+// - HIPAA: Access control monitoring
+// - PCI-DSS: User account management
+//
+// ============================================================================
