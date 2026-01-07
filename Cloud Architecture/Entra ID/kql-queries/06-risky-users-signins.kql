@@ -1,0 +1,413 @@
+// ============================================================================
+// FILE: 06-risky-users-signins.kql
+// CATEGORY: Risky Users & Sign-ins Detection
+// DESCRIPTION: Leverage Azure AD Identity Protection signals for risk detection
+// LAST UPDATED: January 2026
+// ============================================================================
+// ============================================================================
+// Query 6.1: High Risk Sign-ins
+// Description: Detect sign-ins flagged as high risk by Identity Protection
+// Use Case: Identify potentially compromised accounts
+// MITRE ATT&CK: T1078 - Valid Accounts
+// Severity: High
+// False Positive Rate: Low
+// ============================================================================
+SigninLogs
+| where TimeGenerated > ago(7d)
+| where RiskLevelDuringSignIn == “high” or RiskLevelAggregated == “high”
+| project
+TimeGenerated,
+UserPrincipalName,
+IPAddress,
+Location,
+RiskDetail,
+RiskEventTypes,
+RiskState,
+AppDisplayName,
+DeviceDetail,
+ResultType
+| order by TimeGenerated desc
+// Expected Output: High-risk sign-in attempts
+// Common False Positives: VPN usage, travel, legitimate behavior
+// Tuning: Investigate all high-risk events, correlate with other signals
+// ============================================================================
+// Query 6.2: Users with Risk State Changes
+// Description: Track when users are flagged or unflagged as risky
+// Use Case: Monitor risk status transitions
+// MITRE ATT&CK: T1078 - Valid Accounts
+// Severity: Medium
+// False Positive Rate: Low
+// ============================================================================
+AADUserRiskEvents
+| where TimeGenerated > ago(30d)
+| summarize
+Events = count(),
+RiskTypes = make_set(RiskEventType),
+LastDetected = max(TimeGenerated),
+FirstDetected = min(TimeGenerated),
+Locations = make_set(Location),
+IPs = make_set(IPAddress)
+by UserPrincipalName, RiskState, RiskLevel
+| extend Duration = datetime_diff(‘day’, LastDetected, FirstDetected)
+| order by LastDetected desc
+// Expected Output: Users with risk events and their current state
+// Common False Positives: Resolved risks, false detections
+// Tuning: Focus on at-risk or confirmed-compromised states
+// ============================================================================
+// Query 6.3: Anonymous IP Address Sign-ins
+// Description: Identify sign-ins from anonymous proxy services
+// Use Case: Detect attempts to hide sign-in origin
+// MITRE ATT&CK: T1090 - Proxy
+// Severity: Medium
+// False Positive Rate: Low
+// ============================================================================
+SigninLogs
+| where TimeGenerated > ago(7d)
+| where RiskEventTypes has “anonymizedIPAddress”
+| project
+TimeGenerated,
+UserPrincipalName,
+IPAddress,
+Location,
+ResultType,
+AppDisplayName,
+RiskDetail,
+RiskState,
+DeviceDetail
+| order by TimeGenerated desc
+// Expected Output: Sign-ins from anonymous IPs
+// Common False Positives: Privacy-conscious users, corporate VPNs
+// Tuning: Whitelist known VPN ranges, alert on sensitive accounts
+// ============================================================================
+// Query 6.4: Leaked Credentials Detection
+// Description: Detect sign-ins with leaked credentials
+// Use Case: Identify compromised credentials in use
+// MITRE ATT&CK: T1078 - Valid Accounts
+// Severity: Critical
+// False Positive Rate: Very Low
+// ============================================================================
+SigninLogs
+| where TimeGenerated > ago(7d)
+| where RiskEventTypes has “leakedCredentials”
+| project
+TimeGenerated,
+UserPrincipalName,
+IPAddress,
+Location,
+RiskDetail,
+RiskState,
+ResultType,
+AppDisplayName
+| order by TimeGenerated desc
+// Expected Output: Accounts using leaked credentials
+// Common False Positives: Very rare, usually valid detections
+// Tuning: Immediate password reset required, investigate account
+// ============================================================================
+// Query 6.5: Unfamiliar Sign-in Properties
+// Description: Detects sign-ins with unfamiliar characteristics
+// Use Case: Identify anomalous authentication patterns
+// MITRE ATT&CK: T1078 - Valid Accounts
+// Severity: Medium
+// False Positive Rate: Medium
+// ============================================================================
+SigninLogs
+| where TimeGenerated > ago(7d)
+| where RiskEventTypes has “unfamiliarFeatures”
+| project
+TimeGenerated,
+UserPrincipalName,
+IPAddress,
+Location,
+UserAgent,
+DeviceDetail,
+AppDisplayName,
+RiskDetail,
+ResultType
+| order by TimeGenerated desc
+// Expected Output: Sign-ins with unusual properties
+// Common False Positives: New devices, browser updates, location changes
+// Tuning: Baseline user behavior, focus on sensitive accounts
+// ============================================================================
+// Query 6.6: Malicious IP Address Sign-ins
+// Description: Identifies sign-ins from known malicious IPs
+// Use Case: Block or alert on connections from threat intelligence sources
+// MITRE ATT&CK: T1078 - Valid Accounts
+// Severity: High
+// False Positive Rate: Very Low
+// ============================================================================
+SigninLogs
+| where TimeGenerated > ago(7d)
+| where RiskEventTypes has “maliciousIPAddress”
+| project
+TimeGenerated,
+UserPrincipalName,
+IPAddress,
+Location,
+RiskDetail,
+ResultType,
+AppDisplayName,
+DeviceDetail
+| order by TimeGenerated desc
+// Expected Output: Sign-ins from malicious IPs
+// Common False Positives: Rare, validate threat intelligence source
+// Tuning: Block at firewall level, immediate investigation
+// ============================================================================
+// Query 6.7: Atypical Travel Pattern
+// Description: Detects sign-ins indicating physically impossible travel
+// Use Case: Identify account sharing or credential compromise
+// MITRE ATT&CK: T1078 - Valid Accounts
+// Severity: High
+// False Positive Rate: Low
+// ============================================================================
+SigninLogs
+| where TimeGenerated > ago(7d)
+| where RiskEventTypes has “impossibleTravel” or RiskEventTypes has “atypicalTravel”
+| project
+TimeGenerated,
+UserPrincipalName,
+IPAddress,
+Location,
+RiskDetail,
+RiskState,
+ResultType,
+AppDisplayName
+| order by TimeGenerated desc
+// Expected Output: Impossible travel detections
+// Common False Positives: VPN switching, shared accounts
+// Tuning: Exclude service accounts, validate with user
+// ============================================================================
+// Query 6.8: Risk Event Distribution by Type
+// Description: Summarizes risk event types across the environment
+// Use Case: Understand primary threat vectors
+// MITRE ATT&CK: Multiple
+// Severity: Informational
+// False Positive Rate: N/A
+// ============================================================================
+SigninLogs
+| where TimeGenerated > ago(30d)
+| where isnotempty(RiskEventTypes)
+| mv-expand RiskType = RiskEventTypes
+| summarize
+Count = count(),
+UniqueUsers = dcount(UserPrincipalName),
+Users = make_set(UserPrincipalName, 10)
+by tostring(RiskType)
+| order by Count desc
+// Expected Output: Risk event type distribution
+// Common False Positives: N/A - informational query
+// Tuning: Use for threat landscape analysis, trend identification
+// ============================================================================
+// Query 6.9: Users with Multiple Risk Events
+// Description: Identifies users with multiple concurrent risk signals
+// Use Case: Prioritize investigation of high-risk accounts
+// MITRE ATT&CK: T1078 - Valid Accounts
+// Severity: High
+// False Positive Rate: Low
+// ============================================================================
+SigninLogs
+| where TimeGenerated > ago(7d)
+| where isnotempty(RiskEventTypes)
+| mv-expand RiskEvent = RiskEventTypes
+| summarize
+RiskEventCount = dcount(RiskEvent),
+RiskEvents = make_set(RiskEvent),
+RiskLevel = max(RiskLevelAggregated),
+LastSeen = max(TimeGenerated),
+Locations = make_set(Location),
+IPs = make_set(IPAddress)
+by UserPrincipalName
+| where RiskEventCount >= 2
+| order by RiskEventCount desc
+// Expected Output: Users with multiple risk indicators
+// Common False Positives: False positive stacking, legitimate edge cases
+// Tuning: Prioritize accounts with 3+ different risk types
+// ============================================================================
+// Query 6.10: Risky Sign-ins with Successful Authentication
+// Description: High-risk sign-ins that were successful
+// Use Case: Identify potentially compromised accounts that gained access
+// MITRE ATT&CK: T1078 - Valid Accounts
+// Severity: Critical
+// False Positive Rate: Low
+// ============================================================================
+SigninLogs
+| where TimeGenerated > ago(7d)
+| where ResultType == “0”  // Successful sign-in
+| where RiskLevelDuringSignIn in (“high”, “medium”)
+| project
+TimeGenerated,
+UserPrincipalName,
+IPAddress,
+Location,
+RiskLevelDuringSignIn,
+RiskEventTypes,
+RiskDetail,
+AppDisplayName,
+DeviceDetail,
+ConditionalAccessStatus
+| order by TimeGenerated desc
+// Expected Output: Successful risky sign-ins
+// Common False Positives: Risk detection after successful auth
+// Tuning: Immediate investigation required, check CA policy effectiveness
+// ============================================================================
+// Query 6.11: Risk State Remediation Activity
+// Description: Tracks when risky users are remediated or dismissed
+// Use Case: Monitor risk management effectiveness
+// MITRE ATT&CK: N/A
+// Severity: Informational
+// False Positive Rate: N/A
+// ============================================================================
+AADUserRiskEvents
+| where TimeGenerated > ago(30d)
+| where Activity in (“userPerformedSecuredPasswordReset”, “userPerformedSecuredPasswordChange”, “adminDismissedAllRiskForUser”)
+| project
+TimeGenerated,
+UserPrincipalName,
+Activity,
+RiskLevel,
+RiskState,
+RiskEventType
+| order by TimeGenerated desc
+// Expected Output: Risk remediation actions
+// Common False Positives: N/A - tracking query
+// Tuning: Use for compliance reporting, process improvement
+// ============================================================================
+// Query 6.12: Sign-in Risk by Application
+// Description: Aggregates risk events by target application
+// Use Case: Identify which apps attract risky sign-in attempts
+// MITRE ATT&CK: T1078 - Valid Accounts
+// Severity: Informational
+// False Positive Rate: N/A
+// ============================================================================
+SigninLogs
+| where TimeGenerated > ago(30d)
+| where RiskLevelDuringSignIn in (“high”, “medium”)
+| summarize
+RiskyAttempts = count(),
+UniqueUsers = dcount(UserPrincipalName),
+SuccessfulRisky = countif(ResultType == “0”),
+RiskTypes = make_set(RiskEventTypes)
+by AppDisplayName
+| extend SuccessRate = round((todouble(SuccessfulRisky) / RiskyAttempts) * 100, 2)
+| order by RiskyAttempts desc
+// Expected Output: Applications with risky access attempts
+// Common False Positives: N/A - analytical query
+// Tuning: Use to prioritize CA policy deployment
+// ============================================================================
+// Query 6.13: Confirmed Compromised User Activity
+// Description: All activity from confirmed compromised accounts
+// Use Case: Full investigation of validated compromised accounts
+// MITRE ATT&CK: T1078 - Valid Accounts
+// Severity: Critical
+// False Positive Rate: Very Low
+// ============================================================================
+let CompromisedUsers = AADUserRiskEvents
+| where TimeGenerated > ago(30d)
+| where RiskState == “confirmedCompromised”
+| distinct UserPrincipalName;
+SigninLogs
+| where TimeGenerated > ago(30d)
+| where UserPrincipalName in (CompromisedUsers)
+| project
+TimeGenerated,
+UserPrincipalName,
+IPAddress,
+Location,
+AppDisplayName,
+ResultType,
+DeviceDetail,
+RiskLevelDuringSignIn
+| order by TimeGenerated desc
+// Expected Output: All sign-ins from compromised accounts
+// Common False Positives: Activity after remediation
+// Tuning: Disable accounts immediately, full forensic review
+// ============================================================================
+// Query 6.14: Risk Level Escalation
+// Description: Detects when user risk level increases over time
+// Use Case: Early warning of evolving threats
+// MITRE ATT&CK: T1078 - Valid Accounts
+// Severity: High
+// False Positive Rate: Medium
+// ============================================================================
+SigninLogs
+| where TimeGenerated > ago(7d)
+| where isnotempty(RiskLevelAggregated)
+| order by UserPrincipalName, TimeGenerated asc
+| serialize
+| extend
+PrevRisk = prev(RiskLevelAggregated, 1),
+PrevUser = prev(UserPrincipalName, 1)
+| where UserPrincipalName == PrevUser
+| where RiskLevelAggregated == “high” and PrevRisk in (“none”, “low”, “medium”)
+| project
+TimeGenerated,
+UserPrincipalName,
+PreviousRiskLevel = PrevRisk,
+CurrentRiskLevel = RiskLevelAggregated,
+RiskEventTypes,
+IPAddress,
+Location
+| order by TimeGenerated desc
+// Expected Output: Users whose risk level escalated
+// Common False Positives: Multiple concurrent risk events detected
+// Tuning: Alert on escalation to high, investigate immediately
+// ============================================================================
+// ADDITIONAL NOTES
+// ============================================================================
+//
+// Risk Event Types Reference:
+// - anonymizedIPAddress: Sign-in from anonymous IP
+// - leakedCredentials: Credentials found in breach
+// - maliciousIPAddress: Sign-in from known malicious IP
+// - unfamiliarFeatures: Unusual sign-in characteristics
+// - impossibleTravel: Physically impossible travel detected
+// - malwareInfectedIPAddress: Sign-in from malware-infected device
+// - suspiciousIPAddress: Sign-in from suspicious IP
+// - mcasImpossibleTravel: MCAS detected impossible travel
+// - anonymousIPAddress: Tor or anonymous proxy usage
+//
+// Risk Levels:
+// - none: No risk detected
+// - low: Minor risk indicators
+// - medium: Moderate risk, investigation recommended
+// - high: Serious risk, immediate action required
+//
+// Risk States:
+// - atRisk: User currently at risk
+// - confirmedCompromised: Confirmed account compromise
+// - confirmedSafe: Risk dismissed as false positive
+// - dismissed: Risk manually dismissed
+// - remediated: Risk addressed through password change
+//
+// Response Actions by Severity:
+// Critical (Leaked Creds, Confirmed Compromise):
+// 1. Immediate password reset
+// 2. Revoke all sessions
+// 3. MFA re-enrollment
+// 4. Full account audit
+// 5. Notify user and security team
+//
+// High (Multiple Risks, Impossible Travel):
+// 1. Prompt password change
+// 2. Verify with user
+// 3. Review recent activity
+// 4. Enable additional monitoring
+//
+// Medium (Unfamiliar Properties, Anonymous IP):
+// 1. User notification
+// 2. MFA challenge
+// 3. Monitor for additional signals
+// 4. Review access patterns
+//
+// Integration with Other Systems:
+// - SIEM for correlation
+// - SOAR for automated response
+// - Ticketing for investigation tracking
+// - User notification systems
+//
+// Compliance Reporting:
+// - SOC 2: Risk management processes
+// - ISO 27001: Incident detection and response
+// - NIST: Continuous monitoring
+// - Industry-specific: Risk-based authentication
+//
+// ============================================================================
