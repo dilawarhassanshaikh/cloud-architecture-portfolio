@@ -1,0 +1,387 @@
+// ============================================================================
+// FILE: 05-conditional-access.kql
+// CATEGORY: Conditional Access & Policy Monitoring
+// DESCRIPTION: Monitor conditional access policies, failures, and changes
+// LAST UPDATED: January 2026
+// ============================================================================
+// ============================================================================
+// Query 5.1: Conditional Access Policy Failures
+// Description: Identifies sign-ins blocked by conditional access policies
+// Use Case: Monitor policy effectiveness and potential access issues
+// MITRE ATT&CK: T1078 - Valid Accounts
+// Severity: Low to Medium
+// False Positive Rate: Medium
+// ============================================================================
+SigninLogs
+| where TimeGenerated > ago(7d)
+| where ResultType == “53003”  // Blocked by Conditional Access
+| summarize
+FailureCount = count(),
+Users = make_set(UserPrincipalName),
+Apps = make_set(AppDisplayName),
+FirstFailure = min(TimeGenerated),
+LastFailure = max(TimeGenerated)
+by IPAddress, Location, ConditionalAccessStatus
+| where FailureCount > 3
+| order by FailureCount desc
+// Expected Output: IPs/locations with CA policy blocks
+// Common False Positives: Non-compliant devices, expected blocks
+// Tuning: Adjust threshold, exclude expected policy blocks
+// ============================================================================
+// Query 5.2: Conditional Access Policy Changes
+// Description: Tracks modifications to conditional access policies
+// Use Case: Audit policy changes for security and compliance
+// MITRE ATT&CK: T1562 - Impair Defenses
+// Severity: High
+// False Positive Rate: Low
+// ============================================================================
+AuditLogs
+| where TimeGenerated > ago(30d)
+| where Category == “Policy”
+| where OperationName has “conditional access”
+| extend
+PolicyName = tostring(TargetResources[0].displayName),
+ModifiedBy = tostring(InitiatedBy.user.userPrincipalName),
+ModifiedByIP = tostring(InitiatedBy.user.ipAddress),
+Changes = tostring(TargetResources[0].modifiedProperties)
+| project
+TimeGenerated,
+OperationName,
+PolicyName,
+ModifiedBy,
+ModifiedByIP,
+Changes,
+Result
+| order by TimeGenerated desc
+// Expected Output: All CA policy modifications
+// Common False Positives: Legitimate policy tuning, planned changes
+// Tuning: Alert on policy deletions, unexpected modifiers
+// ============================================================================
+// Query 5.3: MFA Registration Activity
+// Description: Monitors Multi-Factor Authentication registration events
+// Use Case: Track MFA adoption and potential security changes
+// MITRE ATT&CK: T1556 - Modify Authentication Process
+// Severity: Medium
+// False Positive Rate: Low
+// ============================================================================
+AuditLogs
+| where TimeGenerated > ago(7d)
+| where OperationName in (
+“User registered security info”,
+“User deleted security info”,
+“User changed default security info”,
+“User started security info registration”
+)
+| extend
+AffectedUser = tostring(TargetResources[0].userPrincipalName),
+InitiatorIP = tostring(InitiatedBy.user.ipAddress),
+MethodInfo = tostring(TargetResources[0].modifiedProperties)
+| project
+TimeGenerated,
+OperationName,
+AffectedUser,
+InitiatorIP,
+MethodInfo,
+Result
+| order by TimeGenerated desc
+// Expected Output: MFA registration/modification events
+// Common False Positives: Normal MFA enrollment, device changes
+// Tuning: Alert on deletions, bulk registrations
+// ============================================================================
+// Query 5.4: Conditional Access Policy Disabled or Deleted
+// Description: Detects when CA policies are disabled or removed
+// Use Case: Identify potential security control removal
+// MITRE ATT&CK: T1562.007 - Impair Defenses: Disable Cloud Logs
+// Severity: Critical
+// False Positive Rate: Low
+// ============================================================================
+AuditLogs
+| where TimeGenerated > ago(30d)
+| where OperationName in (
+“Delete conditional access policy”,
+“Disable conditional access policy”
+)
+| extend
+PolicyName = tostring(TargetResources[0].displayName),
+DeletedBy = tostring(InitiatedBy.user.userPrincipalName),
+DeletedByIP = tostring(InitiatedBy.user.ipAddress)
+| project
+TimeGenerated,
+OperationName,
+PolicyName,
+DeletedBy,
+DeletedByIP,
+Result,
+AdditionalDetails
+| order by TimeGenerated desc
+// Expected Output: Disabled/deleted CA policies
+// Common False Positives: Policy consolidation, legitimate updates
+// Tuning: Alert immediately on critical policies
+// ============================================================================
+// Query 5.5: Sign-ins with Conditional Access Failures by User
+// Description: Users experiencing multiple CA policy blocks
+// Use Case: Identify users with access issues or policy conflicts
+// MITRE ATT&CK: T1078 - Valid Accounts
+// Severity: Low
+// False Positive Rate: Medium
+// ============================================================================
+SigninLogs
+| where TimeGenerated > ago(7d)
+| where ConditionalAccessStatus == “failure”
+| summarize
+FailureCount = count(),
+FailedPolicies = make_set(ConditionalAccessPolicies),
+Apps = make_set(AppDisplayName),
+IPs = make_set(IPAddress),
+FirstFailure = min(TimeGenerated),
+LastFailure = max(TimeGenerated)
+by UserPrincipalName
+| where FailureCount >= 5
+| order by FailureCount desc
+// Expected Output: Users with frequent CA failures
+// Common False Positives: Non-compliant devices, location restrictions
+// Tuning: Adjust failure threshold, exclude pilot users
+// ============================================================================
+// Query 5.6: New Conditional Access Policy Creation
+// Description: Detects when new CA policies are created
+// Use Case: Track policy landscape changes
+// MITRE ATT&CK: T1562 - Impair Defenses
+// Severity: Medium
+// False Positive Rate: Low
+// ============================================================================
+AuditLogs
+| where TimeGenerated > ago(30d)
+| where OperationName == “Add conditional access policy”
+| extend
+PolicyName = tostring(TargetResources[0].displayName),
+CreatedBy = tostring(InitiatedBy.user.userPrincipalName),
+CreatedByIP = tostring(InitiatedBy.user.ipAddress),
+PolicyDetails = tostring(TargetResources[0].modifiedProperties)
+| project
+TimeGenerated,
+PolicyName,
+CreatedBy,
+CreatedByIP,
+PolicyDetails,
+Result
+| order by TimeGenerated desc
+// Expected Output: Newly created CA policies
+// Common False Positives: Legitimate policy additions
+// Tuning: Review all new policies, validate purpose
+// ============================================================================
+// Query 5.7: MFA Method Deletions
+// Description: Monitors when MFA methods are removed from accounts
+// Use Case: Detect potential account takeover preparation
+// MITRE ATT&CK: T1556.006 - Modify Authentication Process: Multi-Factor Authentication
+// Severity: High
+// False Positive Rate: Low
+// ============================================================================
+AuditLogs
+| where TimeGenerated > ago(7d)
+| where OperationName in (
+“User deleted security info”,
+“Admin deleted security info for user”
+)
+| extend
+AffectedUser = tostring(TargetResources[0].userPrincipalName),
+DeletedBy = tostring(InitiatedBy.user.userPrincipalName),
+DeletedByIP = tostring(InitiatedBy.user.ipAddress),
+MethodType = tostring(TargetResources[0].modifiedProperties)
+| project
+TimeGenerated,
+OperationName,
+AffectedUser,
+DeletedBy,
+DeletedByIP,
+MethodType,
+Result
+| order by TimeGenerated desc
+// Expected Output: MFA method removal events
+// Common False Positives: Device loss, phone number changes
+// Tuning: Alert on admin-initiated deletions, bulk operations
+// ============================================================================
+// Query 5.8: Conditional Access - Sign-in Frequency Changes
+// Description: Tracks changes to session lifetime policies
+// Use Case: Monitor for weakening of authentication requirements
+// MITRE ATT&CK: T1562 - Impair Defenses
+// Severity: Medium
+// False Positive Rate: Low
+// ============================================================================
+AuditLogs
+| where TimeGenerated > ago(30d)
+| where OperationName == “Update conditional access policy”
+| where AdditionalDetails has “sessionControls” or AdditionalDetails has “signInFrequency”
+| extend
+PolicyName = tostring(TargetResources[0].displayName),
+ModifiedBy = tostring(InitiatedBy.user.userPrincipalName),
+Changes = tostring(TargetResources[0].modifiedProperties)
+| project
+TimeGenerated,
+PolicyName,
+ModifiedBy,
+Changes,
+Result
+| order by TimeGenerated desc
+// Expected Output: Session control modifications
+// Common False Positives: Legitimate UX improvements, policy tuning
+// Tuning: Alert on extensions, review reductions
+// ============================================================================
+// Query 5.9: Trusted Location Changes
+// Description: Monitors changes to named/trusted locations
+// Use Case: Detect unauthorized location whitelist modifications
+// MITRE ATT&CK: T1562 - Impair Defenses
+// Severity: High
+// False Positive Rate: Low
+// ============================================================================
+AuditLogs
+| where TimeGenerated > ago(30d)
+| where OperationName in (
+“Add named location”,
+“Update named location”,
+“Delete named location”
+)
+| extend
+LocationName = tostring(TargetResources[0].displayName),
+ModifiedBy = tostring(InitiatedBy.user.userPrincipalName),
+ModifiedByIP = tostring(InitiatedBy.user.ipAddress),
+LocationDetails = tostring(TargetResources[0].modifiedProperties)
+| project
+TimeGenerated,
+OperationName,
+LocationName,
+ModifiedBy,
+ModifiedByIP,
+LocationDetails,
+Result
+| order by TimeGenerated desc
+// Expected Output: Named location configuration changes
+// Common False Positives: Network changes, office relocations
+// Tuning: Alert on additions/modifications, validate with IT
+// ============================================================================
+// Query 5.10: Grant Control Changes in CA Policies
+// Description: Detects changes to policy grant controls (MFA, compliant device)
+// Use Case: Monitor for weakening of access requirements
+// MITRE ATT&CK: T1562 - Impair Defenses
+// Severity: High
+// False Positive Rate: Low
+// ============================================================================
+AuditLogs
+| where TimeGenerated > ago(30d)
+| where OperationName == “Update conditional access policy”
+| where AdditionalDetails has “grantControls”
+| extend
+PolicyName = tostring(TargetResources[0].displayName),
+ModifiedBy = tostring(InitiatedBy.user.userPrincipalName),
+ModifiedByIP = tostring(InitiatedBy.user.ipAddress),
+ControlChanges = tostring(TargetResources[0].modifiedProperties)
+| project
+TimeGenerated,
+PolicyName,
+ModifiedBy,
+ModifiedByIP,
+ControlChanges,
+Result
+| order by TimeGenerated desc
+// Expected Output: Grant control modifications
+// Common False Positives: Policy optimization, legitimate changes
+// Tuning: Review all changes, validate security posture maintained
+// ============================================================================
+// Query 5.11: Application Exclusions from CA Policies
+// Description: Monitors when apps are excluded from CA policies
+// Use Case: Detect potential security gaps from exclusions
+// MITRE ATT&CK: T1562 - Impair Defenses
+// Severity: Medium
+// False Positive Rate: Low
+// ============================================================================
+AuditLogs
+| where TimeGenerated > ago(30d)
+| where OperationName == “Update conditional access policy”
+| where AdditionalDetails has “excludeApplications”
+| extend
+PolicyName = tostring(TargetResources[0].displayName),
+ModifiedBy = tostring(InitiatedBy.user.userPrincipalName),
+ExclusionDetails = tostring(TargetResources[0].modifiedProperties)
+| project
+TimeGenerated,
+PolicyName,
+ModifiedBy,
+ExclusionDetails,
+Result
+| order by TimeGenerated desc
+// Expected Output: App exclusion changes
+// Common False Positives: Compatibility issues, known limitations
+// Tuning: Review all exclusions, document business justification
+// ============================================================================
+// Query 5.12: Sign-ins Bypassing MFA Requirements
+// Description: Detects successful sign-ins without MFA when required
+// Use Case: Identify MFA bypass scenarios
+// MITRE ATT&CK: T1556.006 - Multi-Factor Authentication
+// Severity: High
+// False Positive Rate: Low
+// ============================================================================
+SigninLogs
+| where TimeGenerated > ago(7d)
+| where ResultType == “0”  // Successful
+| where AuthenticationRequirement == “multiFactorAuthentication”
+| where MfaDetail.authMethod == “”  // No MFA method used
+| project
+TimeGenerated,
+UserPrincipalName,
+AppDisplayName,
+IPAddress,
+Location,
+DeviceDetail,
+ConditionalAccessPolicies
+| order by TimeGenerated desc
+// Expected Output: Successful sign-ins without expected MFA
+// Common False Positives: Remembered devices, app passwords, legacy auth
+// Tuning: Investigate bypass mechanisms, validate policy config
+// ============================================================================
+// ADDITIONAL NOTES
+// ============================================================================
+//
+// Critical Conditional Access Events:
+// - Policy deletions or disabling
+// - MFA requirement removals
+// - Trusted location additions
+// - Grant control weakening
+// - Application/user exclusions
+//
+// Policy Review Checklist:
+// 1. MFA enforcement for all users
+// 2. Device compliance requirements
+// 3. Risky sign-in blocking
+// 4. Legacy authentication blocking
+// 5. Location-based restrictions
+// 6. Session controls
+//
+// Common CA Policy Types to Monitor:
+// - Require MFA for all users
+// - Block legacy authentication
+// - Require compliant devices
+// - Require approved client apps
+// - Block risky sign-ins
+// - Require MFA for admins
+// - Session controls for sensitive apps
+//
+// Integration Points:
+// - Intune for device compliance
+// - Identity Protection for risk signals
+// - Azure AD logs for user behavior
+// - SIEM for correlation
+//
+// Best Practices:
+// - Test policies in report-only mode first
+// - Exclude break-glass accounts
+// - Document all policy changes
+// - Regular policy reviews (quarterly)
+// - Monitor policy effectiveness
+// - Track false positive rates
+//
+// Alert Priorities:
+// Critical: Policy deletions, MFA removals
+// High: Trusted location changes, grant control weakening
+// Medium: New policies, sign-in frequency changes
+// Low: Individual CA failures
+//
+// ============================================================================
